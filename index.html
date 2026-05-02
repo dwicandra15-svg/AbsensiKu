@@ -644,6 +644,21 @@ select.form-input{cursor:pointer;}
       </div>
 
       <button class="btn-full" onclick="saveBranding()">💾 Simpan Branding</button>
+      <!-- Indikator status sinkronisasi -->
+      <div id="brandingSyncStatus" style="margin-top:10px;padding:10px 12px;border-radius:8px;font-size:12px;background:var(--surface2);border:1px solid var(--border2);display:none;"></div>
+      <!-- SQL hint jika tabel belum ada -->
+      <div id="sqlPengaturan" style="display:none;margin-top:12px;">
+        <div style="font-size:11px;color:var(--orange);font-weight:700;margin-bottom:6px;">⚠ Jalankan SQL ini di Supabase → SQL Editor terlebih dahulu:</div>
+        <pre class="sql-pre" style="font-size:10px;">-- TABEL PENGATURAN (branding & konfigurasi)
+CREATE TABLE IF NOT EXISTS pengaturan (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE pengaturan ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "all" ON pengaturan FOR ALL USING(true);
+-- Setelah dibuat, klik Simpan Branding lagi.</pre>
+      </div>
     </div>
 
     <!-- Supabase -->
@@ -692,7 +707,7 @@ select.form-input{cursor:pointer;}
         SQL Setup Database
       </div>
       <p class="text-muted" style="line-height:1.65;">Jalankan di <strong style="color:var(--accent)">Supabase → SQL Editor</strong>:</p>
-      <pre class="sql-pre">-- TABEL SISWA
+      <pre class="sql-pre">-- ① TABEL SISWA
 CREATE TABLE IF NOT EXISTS siswa (
   id         BIGSERIAL PRIMARY KEY,
   nama       TEXT NOT NULL,
@@ -703,7 +718,7 @@ CREATE TABLE IF NOT EXISTS siswa (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- TABEL ABSENSI
+-- ② TABEL ABSENSI
 CREATE TABLE IF NOT EXISTS absensi (
   id         BIGSERIAL PRIMARY KEY,
   siswa_id   BIGINT REFERENCES siswa(id) ON DELETE SET NULL,
@@ -716,16 +731,25 @@ CREATE TABLE IF NOT EXISTS absensi (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ③ TABEL PENGATURAN (branding, logo, nama sekolah — sinkron semua guru)
+CREATE TABLE IF NOT EXISTS pengaturan (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- INDEX
 CREATE INDEX IF NOT EXISTS ON absensi(tanggal);
 CREATE INDEX IF NOT EXISTS ON absensi(siswa_id);
 CREATE INDEX IF NOT EXISTS ON siswa(rfid_uid);
 
--- RLS
-ALTER TABLE siswa   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE absensi ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "all" ON siswa   FOR ALL USING(true);
-CREATE POLICY "all" ON absensi FOR ALL USING(true);</pre>
+-- RLS (akses publik)
+ALTER TABLE siswa       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE absensi     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pengaturan  ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "all" ON siswa       FOR ALL USING(true);
+CREATE POLICY "all" ON absensi     FOR ALL USING(true);
+CREATE POLICY "all" ON pengaturan  FOR ALL USING(true);</pre>
     </div>
 
   </div>
@@ -893,6 +917,7 @@ let rekapRows = [];
 // BOOT
 // ══════════════════════
 document.addEventListener('DOMContentLoaded', async () => {
+  // Tampilkan branding lokal dulu (instant) sambil fetch dari Supabase
   applyBranding();
   clock();
   setInterval(clock, 1000);
@@ -906,40 +931,92 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('rekapBulan').value = todayKey().substring(0,7);
 
   if (cfg.url && cfg.key) {
-    await loadSiswa();   // siswa dulu agar dropdown kelas siap
-    loadDash();          // baru dashboard, total siswa sudah tersedia
+    // Load branding dari Supabase terlebih dahulu
+    await loadBrandingFromDB();
+    await loadSiswa();
+    loadDash();
   }
   loadSettingsUI();
 });
 
-// ══════════════════════
-// BRANDING
-// ══════════════════════
+// ══════════════════════════════════════
+// BRANDING — TERSIMPAN DI SUPABASE
+// ══════════════════════════════════════
+
+// Ambil branding dari tabel pengaturan di Supabase
+async function loadBrandingFromDB() {
+  try {
+    const rows = await sb('pengaturan?select=key,value&order=key');
+    if (!rows || !rows.length) return;
+    const map = {};
+    rows.forEach(r => { map[r.key] = r.value; });
+    // Gabung ke objek branding
+    if (map.appName)     branding.appName     = map.appName;
+    if (map.appSub)      branding.appSub      = map.appSub;
+    if (map.school)      branding.school      = map.school;
+    if (map.logoDataURL) branding.logoDataURL = map.logoDataURL;
+    if (map.lateCut)     cfg.lateCut          = map.lateCut;
+    if (map.location)    cfg.location         = map.location;
+    // Simpan ke lokal sebagai cache
+    localStorage.setItem('absenBranding', JSON.stringify(branding));
+    applyBranding();
+    loadSettingsUI();
+  } catch(e) {
+    // Tabel mungkin belum dibuat — pakai lokal saja, tidak masalah
+    console.warn('Branding DB belum tersedia, pakai lokal:', e.message);
+  }
+}
+
+// Simpan satu key-value ke tabel pengaturan
+async function sbSetPengaturan(key, value) {
+  // Upsert: insert atau update kalau sudah ada
+  await sb('pengaturan', {
+    method:  'POST',
+    body:    JSON.stringify({ key, value }),
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' }
+  });
+}
+
+// Simpan semua branding ke Supabase sekaligus
+async function saveBrandingToDB() {
+  const entries = [
+    { key: 'appName',     value: branding.appName     || 'AbsenSi' },
+    { key: 'appSub',      value: branding.appSub      || 'Absensi Sekolah · RFID' },
+    { key: 'school',      value: branding.school      || '' },
+    { key: 'logoDataURL', value: branding.logoDataURL || '' },
+    { key: 'lateCut',     value: cfg.lateCut           || '07:30' },
+    { key: 'location',    value: cfg.location          || 'Pintu Utama' },
+  ];
+  for (const e of entries) {
+    await sbSetPengaturan(e.key, e.value);
+  }
+}
+
+// Terapkan branding ke semua elemen UI
 function applyBranding() {
   const appName = branding.appName || 'AbsenSi';
   const appSub  = branding.appSub  || 'Absensi Sekolah · RFID';
   const school  = branding.school  || '';
+
   document.getElementById('hdrAppName').textContent = appName;
   document.getElementById('hdrAppSub').textContent  = appSub;
   document.title = appName + ' — Absensi RFID';
-  // school di dashboard
+
   const dsSchool = document.getElementById('dashSchoolName');
   if (dsSchool) dsSchool.textContent = school;
 
-  // Logo header
+  // Logo di header
   const wrap = document.getElementById('hdrLogoWrap');
   if (branding.logoDataURL) {
     wrap.innerHTML = '';
     const img = document.createElement('img');
-    img.src = branding.logoDataURL; img.style.cssText='width:100%;height:100%;object-fit:cover;border-radius:11px;';
+    img.src = branding.logoDataURL;
+    img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:11px;';
     wrap.appendChild(img);
   } else {
     wrap.innerHTML = '<svg class="logo-fallback" viewBox="0 0 24 24"><path d="M12 3L1 9l11 6 9-4.91V17h2V9M5 13.18v4L12 21l7-3.82v-4L12 17l-7-3.82z"/></svg>';
   }
-
-  // Logo kop preview (pengaturan page)
   _updateKopLogoEl('kopLogoSm');
-  // Logo preview box
   _updateLogoPreviewBox();
 }
 
@@ -947,8 +1024,9 @@ function _updateKopLogoEl(elId) {
   const el = document.getElementById(elId); if (!el) return;
   if (branding.logoDataURL) {
     el.innerHTML = '';
-    const img = document.createElement('img'); img.src = branding.logoDataURL;
-    img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+    const img = document.createElement('img');
+    img.src = branding.logoDataURL;
+    img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:inherit;';
     el.appendChild(img);
   } else {
     el.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 3L1 9l11 6 9-4.91V17h2V9M5 13.18v4L12 21l7-3.82v-4L12 17l-7-3.82z"/></svg>';
@@ -959,7 +1037,8 @@ function _updateLogoPreviewBox() {
   const lpb = document.getElementById('logoPreviewBox'); if (!lpb) return;
   if (branding.logoDataURL) {
     lpb.innerHTML = '';
-    const img = document.createElement('img'); img.src = branding.logoDataURL;
+    const img = document.createElement('img');
+    img.src = branding.logoDataURL;
     img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:12px;';
     lpb.appendChild(img);
   } else {
@@ -969,7 +1048,7 @@ function _updateLogoPreviewBox() {
 
 function handleLogoUpload(input) {
   const file = input.files[0]; if (!file) return;
-  if (file.size > 600*1024) { toast('Ukuran logo max 600KB', 'err'); return; }
+  if (file.size > 800*1024) { toast('Ukuran logo max 800KB', 'err'); return; }
   const reader = new FileReader();
   reader.onload = e => {
     branding.logoDataURL = e.target.result;
@@ -982,12 +1061,13 @@ function handleLogoUpload(input) {
 }
 
 function resetLogo() {
+  if (!confirm('Reset logo ke default?')) return;
   delete branding.logoDataURL;
   _updateLogoPreviewBox();
   _updateKopLogoEl('kopLogoSm');
   document.getElementById('hdrLogoWrap').innerHTML =
     '<svg class="logo-fallback" viewBox="0 0 24 24"><path d="M12 3L1 9l11 6 9-4.91V17h2V9M5 13.18v4L12 21l7-3.82v-4L12 17l-7-3.82z"/></svg>';
-  toast('Logo direset ke default', 'ok');
+  toast('Logo direset', 'ok');
 }
 
 function previewKop() {
@@ -998,14 +1078,42 @@ function previewKop() {
   _updateKopLogoEl('kopLogoSm');
 }
 
-function saveBranding() {
+// Simpan branding: ke Supabase (semua guru) + localStorage (cache lokal)
+async function saveBranding() {
+  const btnSave = event && event.target;
+  if (btnSave) { btnSave.disabled = true; btnSave.textContent = '⏳ Menyimpan...'; }
+
   branding.appName = document.getElementById('pgAppName').value.trim() || 'AbsenSi';
   branding.appSub  = document.getElementById('pgAppSub').value.trim()  || 'Absensi Sekolah · RFID';
   branding.school  = document.getElementById('pgSchool').value.trim();
+  cfg.lateCut      = document.getElementById('pgLateCut').value || '07:30';
+  cfg.location     = document.getElementById('pgLocation').value.trim() || 'Pintu Utama';
+
+  // Simpan ke lokal dulu (instant)
   localStorage.setItem('absenBranding', JSON.stringify(branding));
+  localStorage.setItem('absensiCfg3',   JSON.stringify(cfg));
   applyBranding();
+
+  // Simpan ke Supabase agar semua guru lihat
+  if (cfg.url && cfg.key) {
+    try {
+      await saveBrandingToDB();
+      toast('✓ Branding tersimpan — semua guru akan lihat perubahan ini', 'ok');
+    } catch(e) {
+      // Kalau tabel belum ada, tampilkan pesan SQL
+      if (e.message.includes('pengaturan') || e.message.includes('42P01') || e.message.includes('relation')) {
+        toast('⚠ Buat tabel pengaturan di Supabase dulu (lihat SQL di bawah)', 'err');
+        document.getElementById('sqlPengaturan').style.display = 'block';
+      } else {
+        toast('Tersimpan lokal. DB error: ' + e.message, 'err');
+      }
+    }
+  } else {
+    toast('Tersimpan lokal. Isi URL & Key Supabase agar semua guru sinkron.', '');
+  }
+
+  if (btnSave) { btnSave.disabled = false; btnSave.textContent = '💾 Simpan Branding'; }
   loadSettingsUI();
-  toast('✓ Branding berhasil disimpan', 'ok');
 }
 
 // ══════════════════════
@@ -1722,13 +1830,14 @@ function exportRekapCSV() {
 // SETTINGS
 // ══════════════════════
 function loadSettingsUI() {
-  document.getElementById('pgUrl').value     = cfg.url||'';
-  document.getElementById('pgKey').value     = cfg.key||'';
-  document.getElementById('pgLateCut').value = cfg.lateCut||'07:30';
-  document.getElementById('pgLocation').value= cfg.location||'Pintu Utama';
-  document.getElementById('pgSchool').value  = branding.school||'';
-  document.getElementById('pgAppName').value = branding.appName||'AbsenSi';
-  document.getElementById('pgAppSub').value  = branding.appSub||'Absensi Sekolah · RFID';
+  document.getElementById('pgUrl').value      = cfg.url||'';
+  document.getElementById('pgKey').value      = cfg.key||'';
+  document.getElementById('pgLateCut').value  = cfg.lateCut||'07:30';
+  document.getElementById('pgLocation').value = cfg.location||'Pintu Utama';
+  document.getElementById('pgSchool').value   = branding.school||'';
+  document.getElementById('pgAppName').value  = branding.appName||'AbsenSi';
+  document.getElementById('pgAppSub').value   = branding.appSub||'Absensi Sekolah · RFID';
+
   document.getElementById('stNFC').textContent  = NFC_OK?'Didukung ✓':'Tidak didukung ✗';
   document.getElementById('stNFC').className    = 'st-val '+(NFC_OK?'sv-ok':'sv-warn');
   document.getElementById('stNet').textContent  = navigator.onLine?'Online':'Offline';
@@ -1737,17 +1846,37 @@ function loadSettingsUI() {
   document.getElementById('stSb').textContent   = cfg.url?'Dikonfigurasi ✓':'Belum diisi';
   document.getElementById('stSb').className     = 'st-val '+(cfg.url?'sv-ok':'sv-warn');
   document.getElementById('stSiswa').textContent= siswaAll.length?siswaAll.length+' siswa':'—';
+
+  // Tampilkan status sinkronisasi branding
+  const syncEl = document.getElementById('brandingSyncStatus');
+  if (syncEl) {
+    if (cfg.url && cfg.key) {
+      syncEl.style.display = 'block';
+      syncEl.style.borderColor = 'var(--success-brd)';
+      syncEl.style.color = 'var(--accent)';
+      syncEl.innerHTML = '🌐 <strong>Mode Sinkronisasi Aktif</strong> — Perubahan branding & logo tersimpan ke Supabase dan terlihat oleh <strong>semua guru</strong> yang membuka aplikasi ini.';
+    } else {
+      syncEl.style.display = 'block';
+      syncEl.style.borderColor = 'var(--warn-brd)';
+      syncEl.style.color = 'var(--orange)';
+      syncEl.innerHTML = '⚠ <strong>Mode Lokal</strong> — Branding hanya tersimpan di HP ini. Isi URL & Key Supabase agar semua guru bisa melihat perubahan yang sama.';
+    }
+  }
   previewKop();
 }
 
 async function saveConfig() {
-  cfg.url=document.getElementById('pgUrl').value.trim();
-  cfg.key=document.getElementById('pgKey').value.trim();
-  cfg.lateCut=document.getElementById('pgLateCut').value;
-  cfg.location=document.getElementById('pgLocation').value.trim()||'Pintu Utama';
-  localStorage.setItem('absensiCfg3',JSON.stringify(cfg));
+  cfg.url      = document.getElementById('pgUrl').value.trim();
+  cfg.key      = document.getElementById('pgKey').value.trim();
+  cfg.lateCut  = document.getElementById('pgLateCut').value || '07:30';
+  cfg.location = document.getElementById('pgLocation').value.trim() || 'Pintu Utama';
+  localStorage.setItem('absensiCfg3', JSON.stringify(cfg));
   toast('Disimpan — menguji koneksi...');
   await testConn();
+  // Setelah koneksi berhasil, simpan setting ke Supabase juga
+  if (cfg.url && cfg.key) {
+    try { await saveBrandingToDB(); } catch(e) { /* tabel pengaturan mungkin belum ada */ }
+  }
 }
 
 async function testConn() {
