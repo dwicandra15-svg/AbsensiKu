@@ -731,12 +731,15 @@ CREATE TABLE IF NOT EXISTS absensi (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ③ TABEL PENGATURAN (branding, logo, nama sekolah — sinkron semua guru)
+-- ③ TABEL PENGATURAN (branding & konfigurasi — sinkron semua guru)
 CREATE TABLE IF NOT EXISTS pengaturan (
   key        TEXT PRIMARY KEY,
   value      TEXT,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ④ JIKA TABEL ABSENSI SUDAH ADA — tambah kolom status jika belum ada
+ALTER TABLE absensi ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'hadir';
 
 -- INDEX
 CREATE INDEX IF NOT EXISTS ON absensi(tanggal);
@@ -935,6 +938,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadBrandingFromDB();
     await loadSiswa();
     loadDash();
+
+    // ✅ Auto-refresh dashboard setiap 30 detik agar data selalu terkini
+    // tanpa harus klik refresh manual
+    setInterval(() => {
+      if (document.getElementById('pg-dash').classList.contains('on')) {
+        loadDash();
+      }
+      if (document.getElementById('pg-rekap').classList.contains('on')) {
+        loadRekap();
+      }
+    }, 30000);
   }
   loadSettingsUI();
 });
@@ -1270,18 +1284,30 @@ async function processUID(uid, tipeForced) {
       setTimeout(resetOrb,3500); return;
     }
     let tipe = tipeForced==='auto' ? await detectTipe(siswa.id) : tipeForced;
-    const now=new Date();
-    const cutStr=(cfg.lateCut||'07:30').split(':');
-    const cut=new Date(); cut.setHours(+cutStr[0],+cutStr[1],0,0);
-    const statusAbs=(tipe==='masuk'&&now>cut)?'terlambat':'hadir';
-    await saveAbsensi(siswa,uid,tipe,statusAbs);
+    const now  = new Date();
+    const cutStr = (cfg.lateCut||'07:30').split(':');
+    const cut    = new Date(); cut.setHours(+cutStr[0],+cutStr[1],0,0);
+    const statusAbs = (tipe==='masuk' && now>cut) ? 'terlambat' : 'hadir';
+
+    const saved = await saveAbsensi(siswa, uid, tipe, statusAbs);
     setOrb('ok');
-    showResult('ok',siswa,uid,tipe,statusAbs);
-    addHist(siswa,uid,tipe,statusAbs);
-    setTimeout(resetOrb,4000);
-  } catch(e){
-    setOrb('err'); toast('Error: '+e.message,'err');
-    setTimeout(resetOrb,3000);
+    showResult('ok', siswa, uid, tipe, statusAbs);
+    addHist(siswa, uid, tipe, statusAbs);
+    setTimeout(resetOrb, 4000);
+
+    // ✅ Auto-refresh dashboard & rekap setelah scan tersimpan
+    if (saved) {
+      // Refresh dashboard tanpa pindah halaman
+      loadDash();
+      // Refresh rekap jika tab rekap aktif
+      if (document.getElementById('pg-rekap').classList.contains('on')) {
+        loadRekap();
+      }
+    }
+  } catch(e) {
+    setOrb('err');
+    toast('Error proses: '+e.message,'err');
+    setTimeout(resetOrb, 3000);
   }
 }
 
@@ -1300,14 +1326,38 @@ async function detectTipe(siswaId) {
   } catch { return 'masuk'; }
 }
 
-async function saveAbsensi(siswa,uid,tipe,statusAbs) {
-  const rec={siswa_id:siswa.id,rfid_uid:uid,tipe,status:statusAbs,waktu:new Date().toISOString(),tanggal:todayKey(),lokasi:cfg.location||'Pintu Utama'};
-  try {
-    if(!cfg.url) throw new Error('offline');
-    await sb('absensi',{method:'POST',body:JSON.stringify(rec)});
-  } catch {
+async function saveAbsensi(siswa, uid, tipe, statusAbs) {
+  const rec = {
+    siswa_id : siswa.id,
+    rfid_uid : uid,
+    tipe     : tipe,
+    status   : statusAbs,
+    waktu    : new Date().toISOString(),
+    tanggal  : todayKey(),
+    lokasi   : cfg.location || 'Pintu Utama'
+  };
+  if (!cfg.url || !cfg.key) {
+    // Simpan offline
     offlineQ.push(rec);
-    localStorage.setItem('offQ3',JSON.stringify(offlineQ));
+    localStorage.setItem('offQ3', JSON.stringify(offlineQ));
+    toast('⚠ Offline — tersimpan lokal, akan sync saat online', '');
+    return true;
+  }
+  try {
+    await sb('absensi', { method:'POST', body:JSON.stringify(rec) });
+    return true; // sukses
+  } catch(e) {
+    // Coba tanpa kolom status (jika tabel lama tidak punya kolom status)
+    try {
+      const recMin = { siswa_id:siswa.id, rfid_uid:uid, tipe, waktu:rec.waktu, tanggal:rec.tanggal, lokasi:rec.lokasi };
+      await sb('absensi', { method:'POST', body:JSON.stringify(recMin) });
+      return true;
+    } catch(e2) {
+      offlineQ.push(rec);
+      localStorage.setItem('offQ3', JSON.stringify(offlineQ));
+      toast('⚠ Gagal simpan ke DB: '+e2.message+' — data masuk antrian offline', 'err');
+      return false;
+    }
   }
 }
 
@@ -1429,79 +1479,110 @@ function deleteHistory(idx) {
 // DASHBOARD
 // ══════════════════════
 async function loadDash() {
-  const date=document.getElementById('dashDate')?.value||todayKey();
-  if(!cfg.url||!cfg.key){
-    document.getElementById('dashTbody').innerHTML='<tr><td colspan="6" class="empty" style="padding:24px;">⚙️ Konfigurasi Supabase di tab Pengaturan</td></tr>';
+  // Pastikan filter tanggal selalu terisi hari ini jika kosong
+  const dateEl = document.getElementById('dashDate');
+  if (!dateEl.value) dateEl.value = todayKey();
+  const date = dateEl.value;
+
+  if (!cfg.url || !cfg.key) {
+    document.getElementById('dashTbody').innerHTML =
+      '<tr><td colspan="6" class="empty" style="padding:24px;">⚙️ Konfigurasi Supabase di tab Pengaturan</td></tr>';
     return;
   }
+
+  // Tampilkan loading
+  document.getElementById('dashTbody').innerHTML =
+    '<tr><td colspan="6" class="empty" style="padding:20px;">⏳ Memuat data...</td></tr>';
+
   try {
-    const [siswa,absensi]=await Promise.all([
-      sb('siswa?status=eq.aktif&select=id,nama,nisn,kelas,rfid_uid'),
-      sb('absensi?tanggal=eq.'+date+'&select=*&order=waktu.desc')
+    const [siswa, absensi] = await Promise.all([
+      sb('siswa?status=eq.aktif&select=id,nama,nisn,kelas,rfid_uid&order=nama'),
+      sb('absensi?tanggal=eq.'+date+'&select=id,siswa_id,rfid_uid,tipe,status,waktu,lokasi&order=waktu.desc')
     ]);
-    currentDashSiswaMap={};
-    siswa.forEach(s=>{currentDashSiswaMap[s.id]=s;});
 
-    const hadirSet=new Set(absensi.map(a=>a.siswa_id));
-    const terlambatSet=new Set(absensi.filter(a=>a.status==='terlambat').map(a=>a.siswa_id));
-    const tepatSet=new Set([...hadirSet].filter(id=>!terlambatSet.has(id)));
-    const total=siswa.length, hadir=hadirSet.size;
-    const pct=total?Math.round(hadir/total*100):0;
+    currentDashSiswaMap = {};
+    siswa.forEach(s => { currentDashSiswaMap[s.id] = s; });
 
-    document.getElementById('dsHadir').textContent    = hadir;
-    document.getElementById('dsTotal').textContent    = total;
-    document.getElementById('dsPct').textContent      = pct+'%';
-    document.getElementById('dsPctBar').style.width   = pct+'%';
-    document.getElementById('dsTepat').textContent    = tepatSet.size;
-    document.getElementById('dsTerlambat').textContent= terlambatSet.size;
-    document.getElementById('dsAlpha').textContent    = total-hadir;
-    document.getElementById('dsScan').textContent     = absensi.length;
+    // Hitung statistik — handle jika kolom status belum ada di DB
+    const hadirSet     = new Set(absensi.map(a => a.siswa_id));
+    const terlambatSet = new Set(absensi.filter(a => a.status === 'terlambat').map(a => a.siswa_id));
+    const tepatSet     = new Set([...hadirSet].filter(id => !terlambatSet.has(id)));
+    const total = siswa.length;
+    const hadir = hadirSet.size;
+    const pct   = total ? Math.round(hadir / total * 100) : 0;
 
-    // Group per siswa
-    const grouped={};
-    absensi.forEach(a=>{
-      if(!grouped[a.siswa_id]) grouped[a.siswa_id]={masuk:null,keluar:null,status:a.status,absensiIds:{masuk:null,keluar:null},absensiWaktu:{masuk:null,keluar:null}};
-      if(a.tipe==='masuk'&&!grouped[a.siswa_id].masuk){
-        grouped[a.siswa_id].masuk=a.waktu;
-        grouped[a.siswa_id].absensiIds.masuk=a.id;
-        grouped[a.siswa_id].absensiWaktu.masuk=a.waktu;
+    document.getElementById('dsHadir').textContent     = hadir;
+    document.getElementById('dsTotal').textContent     = total;
+    document.getElementById('dsPct').textContent       = pct + '%';
+    document.getElementById('dsPctBar').style.width    = pct + '%';
+    document.getElementById('dsTepat').textContent     = tepatSet.size;
+    document.getElementById('dsTerlambat').textContent = terlambatSet.size;
+    document.getElementById('dsAlpha').textContent     = total - hadir;
+    document.getElementById('dsScan').textContent      = absensi.length;
+
+    // Group per siswa (masuk & keluar)
+    const grouped = {};
+    absensi.forEach(a => {
+      if (!grouped[a.siswa_id]) {
+        grouped[a.siswa_id] = {
+          masuk:null, keluar:null,
+          status: a.status || 'hadir',
+          absensiIds:  { masuk:null, keluar:null },
+          absensiWaktu:{ masuk:null, keluar:null }
+        };
       }
-      if(a.tipe==='keluar'){
-        grouped[a.siswa_id].keluar=a.waktu;
-        grouped[a.siswa_id].absensiIds.keluar=a.id;
-        grouped[a.siswa_id].absensiWaktu.keluar=a.waktu;
+      const g = grouped[a.siswa_id];
+      if (a.tipe === 'masuk' && !g.masuk) {
+        g.masuk = a.waktu; g.absensiIds.masuk = a.id; g.absensiWaktu.masuk = a.waktu;
       }
-      if(a.status==='terlambat') grouped[a.siswa_id].status='terlambat';
+      if (a.tipe === 'keluar') {
+        g.keluar = a.waktu; g.absensiIds.keluar = a.id; g.absensiWaktu.keluar = a.waktu;
+      }
+      if (a.status === 'terlambat') g.status = 'terlambat';
     });
-    currentDashAbsenMap=grouped;
+    currentDashAbsenMap = grouped;
 
-    const tbody=document.getElementById('dashTbody');
-    const entries=Object.entries(grouped);
-    if(!entries.length){
-      tbody.innerHTML='<tr><td colspan="6" class="empty" style="padding:24px;">Belum ada absensi pada tanggal ini</td></tr>';
+    const tbody  = document.getElementById('dashTbody');
+    const entries = Object.entries(grouped);
+
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty" style="padding:24px;">Belum ada absensi pada tanggal ini</td></tr>';
     } else {
-      tbody.innerHTML=entries.map(([id,g])=>{
-        const s=currentDashSiswaMap[id]||{nama:'Tidak dikenal',nisn:'—',kelas:'—'};
-        const sCls=g.status==='terlambat'?'bt':'bh';
-        const sTxt=g.status==='terlambat'?'Terlambat':'Hadir';
-        const masukId=g.absensiIds.masuk;
-        const keluarId=g.absensiIds.keluar;
+      tbody.innerHTML = entries.map(([id, g]) => {
+        const s      = currentDashSiswaMap[id] || { nama:'Tidak dikenal', nisn:'—', kelas:'—' };
+        const sCls   = g.status === 'terlambat' ? 'bt' : 'bh';
+        const sTxt   = g.status === 'terlambat' ? 'Terlambat' : 'Hadir';
+        const mId    = g.absensiIds.masuk;
+        const kId    = g.absensiIds.keluar;
+        const mWaktu = g.absensiWaktu.masuk  ? encodeURIComponent(g.absensiWaktu.masuk)  : '';
+        const kWaktu = g.absensiWaktu.keluar ? encodeURIComponent(g.absensiWaktu.keluar) : '';
         return `<tr>
-          <td><div class="ava-cell"><div class="mini-ava">${initials(s.nama)}</div><div><div class="cn">${s.nama}</div><div class="cs">${s.kelas||'—'}</div></div></div></td>
+          <td><div class="ava-cell"><div class="mini-ava">${initials(s.nama)}</div>
+              <div><div class="cn">${s.nama}</div><div class="cs">${s.kelas||'—'}</div></div></div></td>
           <td><span class="chip">${s.nisn||'—'}</span></td>
-          <td style="font-family:var(--mono);font-size:11px;color:var(--accent);">${g.masuk?fmtJam(g.masuk):'—'}</td>
-          <td style="font-family:var(--mono);font-size:11px;color:var(--blue);">${g.keluar?fmtJam(g.keluar):'—'}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--accent);">${g.masuk  ? fmtJam(g.masuk)  : '—'}</td>
+          <td style="font-family:var(--mono);font-size:11px;color:var(--blue);">${g.keluar ? fmtJam(g.keluar) : '—'}</td>
           <td><span class="badge ${sCls}">${sTxt}</span></td>
           <td style="white-space:nowrap;">
-            ${masukId?`<button class="btn-sm edit-btn" style="font-size:10px;padding:3px 7px;" onclick="openEditLog(${masukId},'${s.nama}','masuk','${g.absensiWaktu.masuk}','${g.status}')">✏️M</button>`:''}
-            ${keluarId?`<button class="btn-sm edit-btn" style="font-size:10px;padding:3px 7px;margin-left:3px;" onclick="openEditLog(${keluarId},'${s.nama}','keluar','${g.absensiWaktu.keluar}','hadir')">✏️K</button>`:''}
-            <button class="btn-sm danger" style="font-size:10px;padding:3px 7px;margin-left:3px;" onclick="deleteLog(${id},'${date}')">🗑</button>
+            ${mId ? `<button class="btn-sm edit-btn" style="font-size:10px;padding:3px 7px;"
+                onclick="openEditLog(${mId},'${s.nama.replace(/'/g,"\\'")}','masuk','${g.absensiWaktu.masuk}','${g.status}')">✏️M</button>` : ''}
+            ${kId ? `<button class="btn-sm edit-btn" style="font-size:10px;padding:3px 7px;margin-left:3px;"
+                onclick="openEditLog(${kId},'${s.nama.replace(/'/g,"\\'")}','keluar','${g.absensiWaktu.keluar}','hadir')">✏️K</button>` : ''}
+            <button class="btn-sm danger" style="font-size:10px;padding:3px 7px;margin-left:3px;"
+                onclick="deleteLog(${id},'${date}')">🗑</button>
           </td>
         </tr>`;
       }).join('');
     }
-    await buildBarChart(absensi,total);
-  } catch(e){toast(e.message,'err');}
+
+    // Build bar chart 7 hari (non-blocking)
+    buildBarChart(null, total);
+
+  } catch(e) {
+    document.getElementById('dashTbody').innerHTML =
+      `<tr><td colspan="6" class="empty" style="padding:24px;color:var(--red);">❌ Error: ${e.message}</td></tr>`;
+    toast('Dashboard error: ' + e.message, 'err');
+  }
 }
 
 // Edit log dari dashboard
@@ -1665,62 +1746,108 @@ async function delSiswa(id,nama) {
 // REKAP BULANAN
 // ══════════════════════
 async function loadRekap() {
-  const bulan=document.getElementById('rekapBulan').value;
-  const kelasFilter=document.getElementById('rekapKelas')?.value||'';
-  if(!bulan||!cfg.url||!cfg.key){
-    document.getElementById('rekapTbody').innerHTML='<tr><td colspan="7" class="empty" style="padding:24px;">Pilih bulan & pastikan koneksi aktif</td></tr>';
+  const bulanEl = document.getElementById('rekapBulan');
+  if (!bulanEl.value) bulanEl.value = todayKey().substring(0,7);
+  const bulan = bulanEl.value;
+  const kelasFilter = document.getElementById('rekapKelas')?.value || '';
+
+  if (!cfg.url || !cfg.key) {
+    document.getElementById('rekapTbody').innerHTML =
+      '<tr><td colspan="7" class="empty" style="padding:24px;">⚙️ Konfigurasi Supabase di tab Pengaturan</td></tr>';
     return;
   }
-  const [yr,mo]=bulan.split('-');
-  const start=yr+'-'+mo+'-01';
-  const end=new Date(yr,mo,0).toISOString().split('T')[0];
+
+  // Loading state
+  document.getElementById('rekapTbody').innerHTML =
+    '<tr><td colspan="7" class="empty" style="padding:24px;">⏳ Memuat rekap...</td></tr>';
+  ['rkHadir','rkAbsen','rkScan','rkHari'].forEach(id => {
+    document.getElementById(id).textContent = '...';
+  });
+
+  const [yr, mo] = bulan.split('-');
+  const start = `${yr}-${mo}-01`;
+  const end   = new Date(yr, +mo, 0).toISOString().split('T')[0];
+
   try {
-    let siswaQ='siswa?status=eq.aktif&select=id,nama,nisn,kelas';
-    if(kelasFilter) siswaQ+='&kelas=eq.'+encodeURIComponent(kelasFilter);
-    const [siswa,absensi]=await Promise.all([
-      sb(siswaQ+'&order=nama'),
-      sb('absensi?tanggal=gte.'+start+'&tanggal=lte.'+end+'&select=siswa_id,tanggal,tipe,status')
+    let siswaQ = 'siswa?status=eq.aktif&select=id,nama,nisn,kelas&order=nama';
+    if (kelasFilter) siswaQ += '&kelas=eq.' + encodeURIComponent(kelasFilter);
+
+    const [siswa, absensi] = await Promise.all([
+      sb(siswaQ),
+      // Ambil semua kolom agar fallback jika status tidak ada
+      sb(`absensi?tanggal=gte.${start}&tanggal=lte.${end}&select=siswa_id,tanggal,tipe,status&order=tanggal`)
     ]);
 
-    let hk=0;
-    for(let d=new Date(start);d<=new Date(end);d.setDate(d.getDate()+1))
-      if(d.getDay()!==0&&d.getDay()!==6) hk++;
+    // Hitung hari kerja (Senin-Jumat)
+    let hk = 0;
+    for (let d = new Date(start); d <= new Date(end); d.setDate(d.getDate()+1)) {
+      if (d.getDay() !== 0 && d.getDay() !== 6) hk++;
+    }
 
-    const byS={};
-    absensi.forEach(a=>{
-      if(a.tipe!=='masuk') return;
-      if(!byS[a.siswa_id]) byS[a.siswa_id]={hadir:0,terlambat:0};
-      byS[a.siswa_id].hadir++;
-      if(a.status==='terlambat') byS[a.siswa_id].terlambat++;
+    // Hitung per siswa
+    const byS = {};
+    absensi.forEach(a => {
+      if (a.tipe !== 'masuk') return;
+      if (!byS[a.siswa_id]) byS[a.siswa_id] = { hadir: new Set(), terlambat: 0 };
+      byS[a.siswa_id].hadir.add(a.tanggal); // Set agar tidak dobel per hari
+      if (a.status === 'terlambat') byS[a.siswa_id].terlambat++;
     });
 
-    let sumH=0;
-    rekapRows=siswa.map(s=>{
-      const g=byS[s.id]||{hadir:0,terlambat:0};
-      sumH+=g.hadir;
-      return{...s,hadir:g.hadir,terlambat:g.terlambat,absen:hk-g.hadir,pct:hk?Math.round(g.hadir/hk*100):0};
+    let sumH = 0;
+    rekapRows = siswa.map(s => {
+      const g     = byS[s.id] || { hadir: new Set(), terlambat: 0 };
+      const hadir = g.hadir.size;
+      sumH += hadir;
+      const absenCount = Math.max(hk - hadir, 0);
+      return {
+        ...s, hadir, terlambat: g.terlambat,
+        absen: absenCount,
+        pct: hk ? Math.round(hadir / hk * 100) : 0
+      };
     });
 
-    const avg=siswa.length&&hk?Math.round(sumH/(siswa.length*hk)*100):0;
-    document.getElementById('rkHadir').textContent=avg+'%';
-    document.getElementById('rkAbsen').textContent=(100-avg)+'%';
-    document.getElementById('rkScan').textContent=absensi.length;
-    document.getElementById('rkHari').textContent=hk;
+    const avg = (siswa.length && hk) ? Math.round(sumH / (siswa.length * hk) * 100) : 0;
+    document.getElementById('rkHadir').textContent = avg + '%';
+    document.getElementById('rkAbsen').textContent = (100 - avg) + '%';
+    document.getElementById('rkScan').textContent  = absensi.length;
+    document.getElementById('rkHari').textContent  = hk;
 
-    document.getElementById('rekapTbody').innerHTML=rekapRows.sort((a,b)=>b.hadir-a.hadir).map(r=>`
+    if (!rekapRows.length) {
+      document.getElementById('rekapTbody').innerHTML =
+        '<tr><td colspan="7" class="empty" style="padding:24px;">Tidak ada siswa aktif ditemukan</td></tr>';
+      return;
+    }
+
+    document.getElementById('rekapTbody').innerHTML = rekapRows
+      .sort((a,b) => b.hadir - a.hadir)
+      .map(r => `
       <tr>
-        <td><div class="ava-cell"><div class="mini-ava">${initials(r.nama)}</div><div class="cn">${r.nama}</div></div></td>
+        <td><div class="ava-cell">
+          <div class="mini-ava">${initials(r.nama)}</div>
+          <div class="cn">${r.nama}</div>
+        </div></td>
         <td><span class="chip">${r.nisn||'—'}</span></td>
         <td style="color:var(--text2);font-size:11px;">${r.kelas||'—'}</td>
         <td style="color:var(--accent);font-weight:800;font-family:var(--mono);">${r.hadir}</td>
         <td style="color:var(--orange);font-weight:700;font-family:var(--mono);">${r.terlambat}</td>
         <td style="color:var(--red);font-weight:800;font-family:var(--mono);">${r.absen}</td>
         <td>
-          <div class="progress-bar"><div class="pb-fill" style="width:${r.pct}%;background:${r.pct>=80?'var(--accent)':r.pct>=60?'var(--orange)':'var(--red)'}"></div></div>
-          <div style="font-size:10px;font-family:var(--mono);font-weight:700;color:${r.pct>=80?'var(--accent)':r.pct>=60?'var(--orange)':'var(--red)'};">${r.pct}%</div>
+          <div class="progress-bar">
+            <div class="pb-fill" style="width:${r.pct}%;background:${r.pct>=80?'var(--accent)':r.pct>=60?'var(--orange)':'var(--red)'}"></div>
+          </div>
+          <div style="font-size:10px;font-family:var(--mono);font-weight:700;
+            color:${r.pct>=80?'var(--accent)':r.pct>=60?'var(--orange)':'var(--red)'};">${r.pct}%</div>
         </td>
       </tr>`).join('');
-  } catch(e){toast(e.message,'err');}
+
+  } catch(e) {
+    document.getElementById('rekapTbody').innerHTML =
+      `<tr><td colspan="7" class="empty" style="padding:24px;color:var(--red);">❌ Error: ${e.message}</td></tr>`;
+    ['rkHadir','rkAbsen','rkScan','rkHari'].forEach(id => {
+      document.getElementById(id).textContent = '—';
+    });
+    toast('Rekap error: ' + e.message, 'err');
+  }
 }
 
 // ══════════════════════
