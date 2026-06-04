@@ -669,7 +669,7 @@ CREATE POLICY "all" ON pengaturan FOR ALL USING(true);
       </div>
       <div class="form-group">
         <label class="form-label">Supabase Project URL</label>
-        <input type="url" class="form-input mono" id="pgUrl" placeholder="https://xxxx.supabase.co">
+        <input type="url" class="form-input mono" id="pgUrl" placeholder="https://xxxx.supabase.co" value="https://owejzwznmmyqxkefgbtv.supabase.co">
       </div>
       <div class="form-group">
         <label class="form-label">Anon / Public Key</label>
@@ -902,7 +902,10 @@ CREATE POLICY "all" ON pengaturan  FOR ALL USING(true);</pre>
 // ══════════════════════
 // STATE & CONFIG
 // ══════════════════════
-let cfg      = JSON.parse(localStorage.getItem('absensiCfg3') || '{}');
+let cfg = JSON.parse(localStorage.getItem('absensiCfg3') || '{}');
+// Pre-fill Supabase APEL JUMBO jika belum dikonfigurasi
+if (!cfg.url) cfg.url = 'https://owejzwznmmyqxkefgbtv.supabase.co';
+if (!cfg.key) cfg.key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im93ZWp6d3pubW15cXhrZWZnYnR2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1NDk5NjYsImV4cCI6MjA4NzEyNTk2Nn0.7WjNsY55AepK2ci9CpGO2G-YyG58YVi-IKrc1BQDu2A';
 let branding = JSON.parse(localStorage.getItem('absenBranding') || '{}');
 let siswaAll = [];
 let scanning = false, regScanning = false;
@@ -1320,7 +1323,7 @@ async function findSiswa(uid) {
 
 async function detectTipe(siswaId) {
   try {
-    const d=await sb('absensi?siswa_id=eq.'+siswaId+'&tanggal=eq.'+todayKey()+'&select=tipe&order=waktu.desc&limit=1');
+    const d=await sb('absensi_rfid?siswa_id=eq.'+siswaId+'&tanggal=eq.'+todayKey()+'&select=tipe&order=waktu.desc&limit=1');
     if(!d||!d.length) return 'masuk';
     return d[0].tipe==='masuk'?'keluar':'masuk';
   } catch { return 'masuk'; }
@@ -1344,13 +1347,14 @@ async function saveAbsensi(siswa, uid, tipe, statusAbs) {
     return true;
   }
   try {
-    await sb('absensi', { method:'POST', body:JSON.stringify(rec) });
+    // Simpan ke absensi_rfid (tabel baru, tidak ganggu tabel absensi APEL JUMBO)
+    const recRfid = { ...rec, nisn: siswa.nisn || null };
+    await sb('absensi_rfid', { method:'POST', body:JSON.stringify(recRfid) });
     return true; // sukses
   } catch(e) {
-    // Coba tanpa kolom status (jika tabel lama tidak punya kolom status)
     try {
-      const recMin = { siswa_id:siswa.id, rfid_uid:uid, tipe, waktu:rec.waktu, tanggal:rec.tanggal, lokasi:rec.lokasi };
-      await sb('absensi', { method:'POST', body:JSON.stringify(recMin) });
+      const recMin = { siswa_id:siswa.id, rfid_uid:uid, nisn:siswa.nisn||null, tipe, waktu:rec.waktu, tanggal:rec.tanggal, lokasi:rec.lokasi };
+      await sb('absensi_rfid', { method:'POST', body:JSON.stringify(recMin) });
       return true;
     } catch(e2) {
       offlineQ.push(rec);
@@ -1497,7 +1501,7 @@ async function loadDash() {
   try {
     const [siswa, absensi] = await Promise.all([
       sb('siswa?status=eq.aktif&select=id,nama,nisn,kelas,rfid_uid&order=nama'),
-      sb('absensi?tanggal=eq.'+date+'&select=id,siswa_id,rfid_uid,tipe,status,waktu,lokasi&order=waktu.desc')
+      sb('absensi_rfid?tanggal=eq.'+date+'&select=id,siswa_id,rfid_uid,tipe,status,waktu,lokasi&order=waktu.desc')
     ]);
 
     currentDashSiswaMap = {};
@@ -1629,7 +1633,7 @@ async function buildBarChart(todayAbsensiIgnored, total) {
   try {
     const startD = days7[0].k;
     const endD   = days7[days7.length-1].k;
-    const data   = await sb('absensi?tanggal=gte.'+startD+'&tanggal=lte.'+endD+'&tipe=eq.masuk&select=siswa_id,tanggal');
+    const data   = await sb('absensi_rfid?tanggal=gte.'+startD+'&tanggal=lte.'+endD+'&tipe=eq.masuk&select=siswa_id,tanggal');
     const perDay = {};
     data.forEach(a => {
       if(!perDay[a.tanggal]) perDay[a.tanggal] = new Set();
@@ -1775,7 +1779,7 @@ async function loadRekap() {
     const [siswa, absensi] = await Promise.all([
       sb(siswaQ),
       // Ambil semua kolom agar fallback jika status tidak ada
-      sb(`absensi?tanggal=gte.${start}&tanggal=lte.${end}&select=siswa_id,tanggal,tipe,status&order=tanggal`)
+      sb(`absensi_rfid?tanggal=gte.${start}&tanggal=lte.${end}&select=siswa_id,tanggal,tipe,status&order=tanggal`)
     ]);
 
     // Hitung hari kerja (Senin-Jumat)
@@ -1970,7 +1974,7 @@ function loadSettingsUI() {
   document.getElementById('stNet').textContent  = navigator.onLine?'Online':'Offline';
   document.getElementById('stNet').className    = 'st-val '+(navigator.onLine?'sv-ok':'sv-warn');
   document.getElementById('stQ').textContent    = offlineQ.length+' data';
-  document.getElementById('stSb').textContent   = cfg.url?'Dikonfigurasi ✓':'Belum diisi';
+  document.getElementById('stSb').textContent   = cfg.url?'Terhubung ke APEL JUMBO ✓':'Belum diisi';
   document.getElementById('stSb').className     = 'st-val '+(cfg.url?'sv-ok':'sv-warn');
   document.getElementById('stSiswa').textContent= siswaAll.length?siswaAll.length+' siswa':'—';
 
