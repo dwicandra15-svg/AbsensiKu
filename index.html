@@ -939,6 +939,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (cfg.url && cfg.key) {
     // Load branding dari Supabase terlebih dahulu
     await loadBrandingFromDB();
+    await loadKelasList();
     await loadSiswa();
     loadDash();
 
@@ -1164,6 +1165,21 @@ function go(name) {
 }
 
 // Sync kelas dropdown dari siswaAll ke semua filter
+async function loadKelasList() {
+  try {
+    const kelas = await sb('kelas?select=id,nama&order=nama');
+    window._kelasList = kelas || [];
+    // Update dropdown kelas di form siswa
+    const sel = document.getElementById('sKelas');
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">-- Pilih Kelas --</option>' +
+        (kelas||[]).map(k=>`<option value="${k.nama}">${k.nama}</option>`).join('');
+      if (prev) sel.value = prev;
+    }
+  } catch(e) { console.warn('loadKelasList:', e); }
+}
+
 function syncKelasDdl() {
   const kelasList = [...new Set(siswaAll.map(s=>s.kelas||'').filter(Boolean))].sort();
   ['filterKelas','rekapKelas'].forEach(id => {
@@ -1660,7 +1676,13 @@ async function buildBarChart(todayAbsensiIgnored, total) {
 async function loadSiswa() {
   if(!cfg.url||!cfg.key) return;
   try {
-    siswaAll = await sb('siswa?select=*&order=nama');
+    // Join dengan tabel kelas untuk ambil nama kelas
+    siswaAll = await sb('siswa?select=id,nama,nisn,rfid_uid,jenis_kelamin,status,kelas_id,kelas(id,nama)&order=nama');
+    // Mapping: tambah kolom 'kelas' (text) dari join kelas.nama
+    siswaAll = (siswaAll||[]).map(s => ({
+      ...s,
+      kelas: s.kelas?.nama || s.kelas_nama || ''
+    }));
     syncKelasDdl();
     renderSiswa();
     document.getElementById('stSiswa').textContent = siswaAll.length+' siswa';
@@ -1717,10 +1739,13 @@ function openSiswaModal(id,prefillUID) {
 
 async function saveSiswa() {
   const id=document.getElementById('siswaEditId').value;
+  const kelasNama = document.getElementById('sKelas').value.trim()||null;
+  // Cari kelas_id dari nama kelas
+  const kelasObj = window._kelasList?.find(k => k.nama === kelasNama);
   const data={
     nama:document.getElementById('sNama').value.trim(),
     nisn:document.getElementById('sNISN').value.trim()||null,
-    kelas:document.getElementById('sKelas').value.trim()||null,
+    kelas_id: kelasObj?.id || null,
     rfid_uid:document.getElementById('sUID').value.trim()||null,
     status:document.getElementById('sStatus').value
   };
