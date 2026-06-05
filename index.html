@@ -903,9 +903,11 @@ CREATE POLICY "all" ON pengaturan  FOR ALL USING(true);</pre>
 // STATE & CONFIG
 // ══════════════════════
 let cfg = JSON.parse(localStorage.getItem('absensiCfg3') || '{}');
-// Pre-fill Supabase APEL JUMBO jika belum dikonfigurasi
-if (!cfg.url) cfg.url = 'https://owejzwznmmyqxkefgbtv.supabase.co';
-if (!cfg.key) cfg.key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im93ZWp6d3pubW15cXhrZWZnYnR2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1NDk5NjYsImV4cCI6MjA4NzEyNTk2Nn0.7WjNsY55AepK2ci9CpGO2G-YyG58YVi-IKrc1BQDu2A';
+// Hard-code Supabase APEL JUMBO — selalu gunakan ini
+cfg.url = 'https://owejzwznmmyqxkefgbtv.supabase.co';
+cfg.key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im93ZWp6d3pubW15cXhrZWZnYnR2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE1NDk5NjYsImV4cCI6MjA4NzEyNTk2Nn0.7WjNsY55AepK2ci9CpGO2G-YyG58YVi-IKrc1BQDu2A';
+// Simpan permanen ke localStorage
+localStorage.setItem('absensiCfg3', JSON.stringify(cfg));
 let branding = JSON.parse(localStorage.getItem('absenBranding') || '{}');
 let siswaAll = [];
 let scanning = false, regScanning = false;
@@ -939,6 +941,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (cfg.url && cfg.key) {
     // Load branding dari Supabase terlebih dahulu
     await loadBrandingFromDB();
+    await loadKelasList();
     await loadSiswa();
     loadDash();
 
@@ -1164,6 +1167,21 @@ function go(name) {
 }
 
 // Sync kelas dropdown dari siswaAll ke semua filter
+async function loadKelasList() {
+  try {
+    const kelas = await sb('kelas?select=id,nama&order=nama');
+    window._kelasList = kelas || [];
+    // Update dropdown kelas di form siswa
+    const sel = document.getElementById('sKelas');
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">-- Pilih Kelas --</option>' +
+        (kelas||[]).map(k=>`<option value="${k.nama}">${k.nama}</option>`).join('');
+      if (prev) sel.value = prev;
+    }
+  } catch(e) { console.warn('loadKelasList:', e); }
+}
+
 function syncKelasDdl() {
   const kelasList = [...new Set(siswaAll.map(s=>s.kelas||'').filter(Boolean))].sort();
   ['filterKelas','rekapKelas'].forEach(id => {
@@ -1180,11 +1198,13 @@ function syncKelasDdl() {
 async function sb(path, opts={}) {
   if (!cfg.url||!cfg.key) throw new Error('Supabase belum dikonfigurasi. Buka tab Pengaturan.');
   const url = cfg.url.replace(/\/$/,'')+'/rest/v1/'+path;
+  const isPatch = opts.method === 'PATCH';
   const res = await fetch(url,{
     ...opts,
     headers:{
       'apikey':cfg.key,'Authorization':'Bearer '+cfg.key,
-      'Content-Type':'application/json','Prefer':'return=representation',
+      'Content-Type':'application/json',
+      'Prefer': isPatch ? 'return=minimal' : 'return=representation',
       ...(opts.headers||{})
     }
   });
@@ -1660,7 +1680,13 @@ async function buildBarChart(todayAbsensiIgnored, total) {
 async function loadSiswa() {
   if(!cfg.url||!cfg.key) return;
   try {
-    siswaAll = await sb('siswa?select=*&order=nama');
+    // Join dengan tabel kelas untuk ambil nama kelas
+    siswaAll = await sb('siswa?select=id,nama,nisn,rfid_uid,jenis_kelamin,status,kelas_id,kelas(id,nama)&order=nama');
+    // Mapping: tambah kolom 'kelas' (text) dari join kelas.nama
+    siswaAll = (siswaAll||[]).map(s => ({
+      ...s,
+      kelas: s.kelas?.nama || s.kelas_nama || ''
+    }));
     syncKelasDdl();
     renderSiswa();
     document.getElementById('stSiswa').textContent = siswaAll.length+' siswa';
@@ -1717,17 +1743,25 @@ function openSiswaModal(id,prefillUID) {
 
 async function saveSiswa() {
   const id=document.getElementById('siswaEditId').value;
+  const kelasNama = document.getElementById('sKelas').value.trim()||null;
+  // Cari kelas_id dari nama kelas
+  const kelasObj = window._kelasList?.find(k => k.nama === kelasNama);
   const data={
     nama:document.getElementById('sNama').value.trim(),
     nisn:document.getElementById('sNISN').value.trim()||null,
-    kelas:document.getElementById('sKelas').value.trim()||null,
+    kelas_id: kelasObj?.id || null,
     rfid_uid:document.getElementById('sUID').value.trim()||null,
     status:document.getElementById('sStatus').value
   };
   if(!data.nama){toast('Nama siswa wajib diisi','err');return;}
   try {
-    if(id) await sb('siswa?id=eq.'+id,{method:'PATCH',body:JSON.stringify(data)});
-    else   await sb('siswa',{method:'POST',body:JSON.stringify(data)});
+    if(id) {
+      // Update hanya rfid_uid — data lain dikelola APEL JUMBO
+      const patchData = { rfid_uid: data.rfid_uid };
+      await sb('siswa?id=eq.'+id, {method:'PATCH', body:JSON.stringify(patchData)});
+    } else {
+      await sb('siswa',{method:'POST',body:JSON.stringify(data)});
+    }
     toast(id?'✓ Data siswa diperbarui':'✓ Siswa ditambahkan','ok');
     closeMod('siswa');
     await loadSiswa();
