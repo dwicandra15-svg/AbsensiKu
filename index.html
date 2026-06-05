@@ -963,38 +963,34 @@ document.addEventListener('DOMContentLoaded', async () => {
 // BRANDING — TERSIMPAN DI SUPABASE
 // ══════════════════════════════════════
 
-// Ambil branding dari tabel pengaturan di Supabase
+// Ambil branding dari app_settings APEL JUMBO (tabel pengaturan tidak ada)
 async function loadBrandingFromDB() {
   try {
-    const rows = await sb('pengaturan?select=key,value&order=key');
+    // Baca apel_config dari app_settings untuk ambil nama sekolah
+    const rows = await sb('app_settings?select=key,value');
     if (!rows || !rows.length) return;
-    const map = {};
-    rows.forEach(r => { map[r.key] = r.value; });
-    // Gabung ke objek branding
-    if (map.appName)     branding.appName     = map.appName;
-    if (map.appSub)      branding.appSub      = map.appSub;
-    if (map.school)      branding.school      = map.school;
-    if (map.logoDataURL) branding.logoDataURL = map.logoDataURL;
-    if (map.lateCut)     cfg.lateCut          = map.lateCut;
-    if (map.location)    cfg.location         = map.location;
-    // Simpan ke lokal sebagai cache
+    const cfgRow = rows.find(r => r.key === 'apel_config');
+    if (cfgRow?.value) {
+      try {
+        const apelCfg = typeof cfgRow.value === 'string'
+          ? JSON.parse(cfgRow.value) : cfgRow.value;
+        if (apelCfg.school)  branding.school  = apelCfg.school;
+        if (apelCfg.subtitle) branding.appSub = apelCfg.subtitle;
+        if (apelCfg.logo)    branding.logoDataURL = apelCfg.logo;
+      } catch(e) {}
+    }
     localStorage.setItem('absenBranding', JSON.stringify(branding));
     applyBranding();
     loadSettingsUI();
   } catch(e) {
-    // Tabel mungkin belum dibuat — pakai lokal saja, tidak masalah
     console.warn('Branding DB belum tersedia, pakai lokal:', e.message);
   }
 }
 
-// Simpan satu key-value ke tabel pengaturan
+// Simpan branding — di APEL JUMBO integration, skip (dikelola APEL JUMBO)
 async function sbSetPengaturan(key, value) {
-  // Upsert: insert atau update kalau sudah ada
-  await sb('pengaturan', {
-    method:  'POST',
-    body:    JSON.stringify({ key, value }),
-    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' }
-  });
+  // Tidak perlu simpan ke DB — branding dikelola dari APEL JUMBO
+  console.log('sbSetPengaturan skipped (managed by APEL JUMBO):', key);
 }
 
 // Simpan semua branding ke Supabase sekaligus
@@ -1400,7 +1396,7 @@ function showResult(type,siswa,uid,tipe,status) {
         <div>
           <div class="rb-name">${siswa.nama}</div>
           <div class="rb-kelas">${siswa.kelas||'Siswa'}</div>
-          <div class="rb-nisn">NISN: ${siswa.nisn||'—'}</div>
+          <div class="rb-nisn">NISN: ${siswa.nis||siswa.nisn||'—'}</div>
         </div>
       </div>
       <div class="rb-grid">
@@ -1454,7 +1450,7 @@ function renderHistory() {
       <div class="hi-ava">${initials(h.nama)}</div>
       <div class="hi-info">
         <div class="hi-name">${h.nama}</div>
-        <div class="hi-meta">${h.kelas} · NISN ${h.nisn}</div>
+        <div class="hi-meta">${h.kelas} · NISN ${h.nis||h.nisn||'—'}</div>
       </div>
       <div class="hi-right">
         <div class="hi-time">${h.waktu}</div>
@@ -1520,7 +1516,7 @@ async function loadDash() {
 
   try {
     const [siswa, absensi] = await Promise.all([
-      sb('siswa?status=eq.aktif&select=id,nama,nisn,kelas,rfid_uid&order=nama'),
+      sb('siswa?status=eq.aktif&select=id,nama,nis,kelas,rfid_uid&order=nama'),
       sb('absensi_rfid?tanggal=eq.'+date+'&select=id,siswa_id,rfid_uid,tipe,status,waktu,lokasi&order=waktu.desc')
     ]);
 
@@ -1732,7 +1728,7 @@ function openSiswaModal(id,prefillUID) {
     document.getElementById('siswaModTitle').textContent='Edit Siswa — '+s.nama;
     document.getElementById('siswaEditId').value=s.id;
     document.getElementById('sNama').value=s.nama;
-    document.getElementById('sNISN').value=s.nisn||'';
+    document.getElementById('sNISN').value=s.nis||s.nisn||'';
     document.getElementById('sKelas').value=s.kelas||'';
     document.getElementById('sUID').value=s.rfid_uid||'';
     document.getElementById('sStatus').value=s.status||'aktif';
@@ -1808,7 +1804,7 @@ async function loadRekap() {
   const end   = new Date(yr, +mo, 0).toISOString().split('T')[0];
 
   try {
-    let siswaQ = 'siswa?status=eq.aktif&select=id,nama,nisn,kelas&order=nama';
+    let siswaQ = 'siswa?status=eq.aktif&select=id,nama,nis,kelas&order=nama';
     if (kelasFilter) siswaQ += '&kelas=eq.' + encodeURIComponent(kelasFilter);
 
     const [siswa, absensi] = await Promise.all([
