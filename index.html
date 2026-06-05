@@ -1368,12 +1368,12 @@ async function saveAbsensi(siswa, uid, tipe, statusAbs) {
   }
   try {
     // Simpan ke absensi_rfid (tabel baru, tidak ganggu tabel absensi APEL JUMBO)
-    const recRfid = { ...rec, nisn: siswa.nisn || null };
+    const recRfid = { ...rec, nisn: siswa.nis || siswa.nisn || null };
     await sb('absensi_rfid', { method:'POST', body:JSON.stringify(recRfid) });
     return true; // sukses
   } catch(e) {
     try {
-      const recMin = { siswa_id:siswa.id, rfid_uid:uid, nisn:siswa.nisn||null, tipe, waktu:rec.waktu, tanggal:rec.tanggal, lokasi:rec.lokasi };
+      const recMin = { siswa_id:siswa.id, rfid_uid:uid, nisn:siswa.nis||siswa.nisn||null, tipe, waktu:rec.waktu, tanggal:rec.tanggal, lokasi:rec.lokasi };
       await sb('absensi_rfid', { method:'POST', body:JSON.stringify(recMin) });
       return true;
     } catch(e2) {
@@ -1583,7 +1583,7 @@ async function loadDash() {
         return `<tr>
           <td><div class="ava-cell"><div class="mini-ava">${initials(s.nama)}</div>
               <div><div class="cn">${s.nama}</div><div class="cs">${s.kelas||'—'}</div></div></div></td>
-          <td><span class="chip">${s.nisn||'—'}</span></td>
+          <td><span class="chip">${s.nis||s.nisn||'—'}</span></td>
           <td style="font-family:var(--mono);font-size:11px;color:var(--accent);">${g.masuk  ? fmtJam(g.masuk)  : '—'}</td>
           <td style="font-family:var(--mono);font-size:11px;color:var(--blue);">${g.keluar ? fmtJam(g.keluar) : '—'}</td>
           <td><span class="badge ${sCls}">${sTxt}</span></td>
@@ -1681,11 +1681,12 @@ async function loadSiswa() {
   if(!cfg.url||!cfg.key) return;
   try {
     // Join dengan tabel kelas untuk ambil nama kelas
-    siswaAll = await sb('siswa?select=id,nama,nisn,rfid_uid,jenis_kelamin,status,kelas_id,kelas(id,nama)&order=nama');
+    siswaAll = await sb('siswa?select=id,nama,nis,rfid_uid,jenis_kelamin,status,kelas_id,kelas(id,nama)&order=nama');
     // Mapping: tambah kolom 'kelas' (text) dari join kelas.nama
     siswaAll = (siswaAll||[]).map(s => ({
       ...s,
-      kelas: s.kelas?.nama || s.kelas_nama || ''
+      kelas: s.kelas?.nama || s.kelas_nama || '',
+      nisn: s.nis || s.nisn || '' // alias — APEL JUMBO pakai kolom 'nis'
     }));
     syncKelasDdl();
     renderSiswa();
@@ -1700,7 +1701,7 @@ function renderSiswa() {
   const q=(document.getElementById('searchSiswa')?.value||'').toLowerCase();
   const kelas=(document.getElementById('filterKelas')?.value||'');
   let filtered=siswaAll.filter(s=>{
-    const mQ=!q||(s.nama||'').toLowerCase().includes(q)||(s.nisn||'').includes(q)||(s.kelas||'').toLowerCase().includes(q);
+    const mQ=!q||(s.nama||'').toLowerCase().includes(q)||(s.nis||s.nisn||'').includes(q)||(s.kelas||'').toLowerCase().includes(q);
     const mK=!kelas||(s.kelas||'')===kelas;
     return mQ&&mK;
   });
@@ -1710,7 +1711,7 @@ function renderSiswa() {
   tbody.innerHTML=filtered.map(s=>`
     <tr>
       <td><div class="ava-cell"><div class="mini-ava">${initials(s.nama)}</div><div><div class="cn">${s.nama}</div><div class="cs">${s.kelas||'—'}</div></div></div></td>
-      <td><span class="chip">${s.nisn||'—'}</span></td>
+      <td><span class="chip">${s.nis||s.nisn||'—'}</span></td>
       <td style="color:var(--text2);font-size:11px;">${s.kelas||'—'}</td>
       <td><span class="chip">${s.rfid_uid||'—'}</span></td>
       <td><span class="badge ${s.status==='aktif'?'bm':'ba'}">${s.status||'aktif'}</span></td>
@@ -1748,7 +1749,7 @@ async function saveSiswa() {
   const kelasObj = window._kelasList?.find(k => k.nama === kelasNama);
   const data={
     nama:document.getElementById('sNama').value.trim(),
-    nisn:document.getElementById('sNISN').value.trim()||null,
+    nis:document.getElementById('sNISN').value.trim()||null,
     kelas_id: kelasObj?.id || null,
     rfid_uid:document.getElementById('sUID').value.trim()||null,
     status:document.getElementById('sStatus').value
