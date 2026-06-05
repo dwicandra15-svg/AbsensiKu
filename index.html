@@ -1332,8 +1332,9 @@ async function processUID(uid, tipeForced) {
 
 async function findSiswa(uid) {
   try {
-    const d = await sb('siswa?rfid_uid=eq.'+encodeURIComponent(uid)+'&select=*');
-    return d&&d[0] ? d[0] : null;
+    const d = await sb('siswa?rfid_uid=eq.'+encodeURIComponent(uid)+'&select=id,nama,nis,rfid_uid,kelas_id,kelas(id,nama)');
+    if (!d||!d[0]) return null;
+    return { ...d[0], kelas: d[0].kelas?.nama||'', nisn: d[0].nis||'', status:'aktif' };
   } catch { return null; }
 }
 
@@ -1515,10 +1516,17 @@ async function loadDash() {
     '<tr><td colspan="6" class="empty" style="padding:20px;">⏳ Memuat data...</td></tr>';
 
   try {
-    const [siswa, absensi] = await Promise.all([
-      sb('siswa?status=eq.aktif&select=id,nama,nis,kelas,rfid_uid&order=nama'),
+    const [siswaRaw, absensi] = await Promise.all([
+      sb('siswa?select=id,nama,nis,rfid_uid,kelas_id,kelas(id,nama)&order=nama'),
       sb('absensi_rfid?tanggal=eq.'+date+'&select=id,siswa_id,rfid_uid,tipe,status,waktu,lokasi&order=waktu.desc')
     ]);
+    // Map kolom kelas dari join + alias nisn & status
+    const siswa = (siswaRaw||[]).map(s => ({
+      ...s,
+      kelas:  s.kelas?.nama || '',
+      nisn:   s.nis || '',
+      status: 'aktif'
+    }));
 
     currentDashSiswaMap = {};
     siswa.forEach(s => { currentDashSiswaMap[s.id] = s; });
@@ -1677,12 +1685,13 @@ async function loadSiswa() {
   if(!cfg.url||!cfg.key) return;
   try {
     // Join dengan tabel kelas untuk ambil nama kelas
-    siswaAll = await sb('siswa?select=id,nama,nis,rfid_uid,jenis_kelamin,status,kelas_id,kelas(id,nama)&order=nama');
+    siswaAll = await sb('siswa?select=id,nama,nis,rfid_uid,jenis_kelamin,kelas_id,kelas(id,nama)&order=nama');
     // Mapping: tambah kolom 'kelas' (text) dari join kelas.nama
     siswaAll = (siswaAll||[]).map(s => ({
       ...s,
-      kelas: s.kelas?.nama || s.kelas_nama || '',
-      nisn: s.nis || s.nisn || '' // alias — APEL JUMBO pakai kolom 'nis'
+      kelas:  s.kelas?.nama || '',
+      nisn:   s.nis || '',
+      status: 'aktif' // kolom status tidak ada, default aktif semua
     }));
     syncKelasDdl();
     renderSiswa();
@@ -1747,8 +1756,8 @@ async function saveSiswa() {
     nama:document.getElementById('sNama').value.trim(),
     nis:document.getElementById('sNISN').value.trim()||null,
     kelas_id: kelasObj?.id || null,
-    rfid_uid:document.getElementById('sUID').value.trim()||null,
-    status:document.getElementById('sStatus').value
+    rfid_uid:document.getElementById('sUID').value.trim()||null
+    // kolom 'status' tidak ada di tabel siswa APEL JUMBO
   };
   if(!data.nama){toast('Nama siswa wajib diisi','err');return;}
   try {
